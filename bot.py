@@ -67,6 +67,41 @@ def save_monitors():
 load_monitors()
 
 
+def find_monitor_key(text: str) -> str | None:
+    """Достаёт цель мониторинга из текста команды.
+
+    Возвращает username (в нижнем регистре) либо 'id:<число>' для Telegram ID.
+    None — если цель не найдена.
+    """
+    m = re.search(r'@(\w+)', text)
+    if m:
+        return m.group(1).lower()
+    m = re.search(r'(\d{6,})', text)  # Telegram ID — минимум 6 цифр
+    if m:
+        return f"id:{m.group(1)}"
+    return None
+
+
+def display_key(key: str) -> str:
+    """Человекочитаемое имя ключа мониторинга."""
+    if key.startswith("id:"):
+        return f"ID {key[3:]}"
+    return f"@{key}"
+
+
+def monitor_key_for_owner(owner: dict | None) -> str | None:
+    """Возвращает ключ мониторинга, под которым владелец подключения отслеживается."""
+    if not owner:
+        return None
+    uname = owner.get("username", "")
+    if uname and uname in monitors:
+        return uname
+    uid = owner.get("user_id")
+    if uid and f"id:{uid}" in monitors:
+        return f"id:{uid}"
+    return None
+
+
 def fmt(dt: datetime) -> str:
     return dt.astimezone(MSK).strftime("%d.%m.%Y %H:%M:%S")
 
@@ -577,9 +612,10 @@ async def on_business_message(message: Message):
         await send_live_media(MY_USER_ID, message, header)
         cache[key]["media_forwarded"] = True
 
-    if owner_username and owner_username in monitors and owner_id != MY_USER_ID:
+    mon_key = monitor_key_for_owner(owner)
+    if mon_key and owner_id != MY_USER_ID:
         # Проверка исключений чатов
-        excludes = monitors[owner_username].get("excludes", [])
+        excludes = monitors[mon_key].get("excludes", [])
         chat_uname_raw = (message.chat.username or "").lower()
         if chat_uname_raw in excludes:
             return
@@ -683,7 +719,7 @@ async def on_edited_business_message(message: Message):
     sender = sender_name + (f" ({sender_username})" if sender_username else "")
     unum = get_user_num(sender_id) if sender_id else 0
     owner_username = owner["username"] if owner else ""
-    is_monitored = owner_username and owner_username in monitors and owner_id != MY_USER_ID
+    is_monitored = bool(monitor_key_for_owner(owner)) and owner_id != MY_USER_ID
 
     if old_data:
         msg_num = old_data.get("msg_num", "?")
@@ -754,17 +790,16 @@ async def cmd_check(message: Message):
     if message.from_user.id != MY_USER_ID:
         return
     text = message.text or ""
-    match = re.search(r'@(\w+)', text)
-    if not match:
-        await message.answer("📋 <code>/check @username</code>", parse_mode="HTML")
+    key = find_monitor_key(text)
+    if not key:
+        await message.answer("📋 <code>/check @username</code> или <code>/check 123456789</code>", parse_mode="HTML")
         return
-    username = match.group(1).lower()
-    if username not in monitors:
-        monitors[username] = {"added_at": fmt(datetime.now(MSK)), "excludes": []}
+    if key not in monitors:
+        monitors[key] = {"added_at": fmt(datetime.now(MSK)), "excludes": []}
     else:
-        monitors[username]["added_at"] = fmt(datetime.now(MSK))
+        monitors[key]["added_at"] = fmt(datetime.now(MSK))
     save_monitors()
-    await message.answer(f"✅ <b>Мониторинг @{username} включён</b>", parse_mode="HTML")
+    await message.answer(f"✅ <b>Мониторинг {display_key(key)} включён</b>", parse_mode="HTML")
 
 
 @dp.message(Command("uncheck"))
@@ -772,17 +807,16 @@ async def cmd_uncheck(message: Message):
     if message.from_user.id != MY_USER_ID:
         return
     text = message.text or ""
-    match = re.search(r'@(\w+)', text)
-    if not match:
-        await message.answer("📋 <code>/uncheck @username</code>", parse_mode="HTML")
+    key = find_monitor_key(text)
+    if not key:
+        await message.answer("📋 <code>/uncheck @username</code> или <code>/uncheck 123456789</code>", parse_mode="HTML")
         return
-    username = match.group(1).lower()
-    if username in monitors:
-        del monitors[username]
+    if key in monitors:
+        del monitors[key]
         save_monitors()
-        await message.answer(f"🛑 Мониторинг @{username} отключён.", parse_mode="HTML")
+        await message.answer(f"🛑 Мониторинг {display_key(key)} отключён.", parse_mode="HTML")
     else:
-        await message.answer(f"⚠️ @{username} не в списке.", parse_mode="HTML")
+        await message.answer(f"⚠️ {display_key(key)} не в списке.", parse_mode="HTML")
 
 
 @dp.message(Command("monitors"))
@@ -796,7 +830,7 @@ async def cmd_monitors(message: Message):
     for acc, info in monitors.items():
         excl = info.get("excludes", [])
         excl_str = f"  🚫 исключены: {', '.join('@'+e for e in excl)}" if excl else ""
-        lines.append(f"• @{acc} — с {info['added_at']}{excl_str}")
+        lines.append(f"• {display_key(acc)} — с {info['added_at']}{excl_str}")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
@@ -820,31 +854,42 @@ async def cmd_last(message: Message):
     if message.from_user.id != MY_USER_ID:
         return
     text = message.text or ""
-    # /last @username 10  или  /last 10 @username  или  /last @username
-    uname_match = re.search(r'@(\w+)', text)
-    num_match = re.search(r'(?:^/last\s+|@\w+\s+)(\d+)|(\d+)\s+@', text)
-    if not uname_match:
-        await message.answer("📋 <code>/last @username 10</code>", parse_mode="HTML")
+    # /last @username 10  или  /last 123456789 10  (ID), счётчик опционален
+    key = find_monitor_key(text)
+    if not key:
+        await message.answer("📋 <code>/last @username 10</code> или <code>/last 123456789 10</code>", parse_mode="HTML")
         return
-    username = uname_match.group(1).lower()
-    count = int((num_match.group(1) or num_match.group(2)) if num_match else 10)
+
+    # Счётчик — последнее число, не являющееся самим ID
+    id_str = key[3:] if key.startswith("id:") else None
+    nums = [n for n in re.findall(r'\d+', text) if n != id_str]
+    count = int(nums[-1]) if nums else 10
 
     results = []
-    for (conn_id, msg_id), data in cache.items():
-        owner = connections.get(conn_id)
-        if not owner:
-            continue
-        owner_uname = owner.get("username", "")
-        chat_uname_raw = data.get("chat_uname", "").strip(" ()@").lower()
-        sender_uname_raw = data.get("sender_username", "").strip("@").lower()
-        if username in (owner_uname, chat_uname_raw, sender_uname_raw):
-            results.append(data)
+    if id_str:
+        target_id = int(id_str)
+        for (conn_id, msg_id), data in cache.items():
+            owner = connections.get(conn_id)
+            owner_uid = owner.get("user_id") if owner else None
+            if target_id in (owner_uid, data.get("sender_id")):
+                results.append(data)
+    else:
+        username = key
+        for (conn_id, msg_id), data in cache.items():
+            owner = connections.get(conn_id)
+            if not owner:
+                continue
+            owner_uname = owner.get("username", "")
+            chat_uname_raw = data.get("chat_uname", "").strip(" ()@").lower()
+            sender_uname_raw = data.get("sender_username", "").strip("@").lower()
+            if username in (owner_uname, chat_uname_raw, sender_uname_raw):
+                results.append(data)
 
     results.sort(key=lambda d: d["sent_at"], reverse=True)
     results = results[:count]
 
     if not results:
-        await message.answer(f"📭 Нет сообщений для @{username} в кеше.")
+        await message.answer(f"📭 Нет сообщений для {display_key(key)} в кеше.")
         return
 
     lines = []
@@ -869,7 +914,7 @@ async def cmd_last(message: Message):
         lines.append(f"<b>{time_str}</b> | {chat}\n  {sender}: {content}")
 
     # Разбиваем на сообщения по 4000 символов
-    header = f"📜 <b>Последние {len(results)} для @{username}:</b>\n\n"
+    header = f"📜 <b>Последние {len(results)} для {display_key(key)}:</b>\n\n"
     chunks = []
     current = header
     for line in lines:
@@ -889,22 +934,23 @@ async def cmd_exclude(message: Message):
     if message.from_user.id != MY_USER_ID:
         return
     text = message.text or ""
-    # /exclude @monitored_user @chat_to_exclude
-    matches = re.findall(r'@(\w+)', text)
-    if len(matches) < 2:
-        await message.answer("📋 <code>/exclude @мониторимый @чат_исключить</code>", parse_mode="HTML")
+    # /exclude @мониторимый @чат_исключить  (мониторимый может быть и ID)
+    key = find_monitor_key(text)
+    ats = re.findall(r'@(\w+)', text)
+    chat_excl = (ats[0] if key.startswith("id:") else (ats[1] if len(ats) >= 2 else None)) if key else None
+    chat_excl = chat_excl.lower() if chat_excl else None
+    if not key or not chat_excl:
+        await message.answer("📋 <code>/exclude @мониторимый @чат_исключить</code> (вместо @мониторимый можно ID)", parse_mode="HTML")
         return
-    username = matches[0].lower()
-    chat_excl = matches[1].lower()
-    if username not in monitors:
-        await message.answer(f"⚠️ @{username} не в мониторинге.", parse_mode="HTML")
+    if key not in monitors:
+        await message.answer(f"⚠️ {display_key(key)} не в мониторинге.", parse_mode="HTML")
         return
-    excludes = monitors[username].setdefault("excludes", [])
+    excludes = monitors[key].setdefault("excludes", [])
     if chat_excl not in excludes:
         excludes.append(chat_excl)
         save_monitors()
     await message.answer(
-        f"🚫 Чат @{chat_excl} исключён из мониторинга @{username}",
+        f"🚫 Чат @{chat_excl} исключён из мониторинга {display_key(key)}",
         parse_mode="HTML"
     )
 
@@ -914,22 +960,23 @@ async def cmd_include(message: Message):
     if message.from_user.id != MY_USER_ID:
         return
     text = message.text or ""
-    matches = re.findall(r'@(\w+)', text)
-    if len(matches) < 2:
-        await message.answer("📋 <code>/include @мониторимый @чат_вернуть</code>", parse_mode="HTML")
+    key = find_monitor_key(text)
+    ats = re.findall(r'@(\w+)', text)
+    chat_incl = (ats[0] if key.startswith("id:") else (ats[1] if len(ats) >= 2 else None)) if key else None
+    chat_incl = chat_incl.lower() if chat_incl else None
+    if not key or not chat_incl:
+        await message.answer("📋 <code>/include @мониторимый @чат_вернуть</code> (вместо @мониторимый можно ID)", parse_mode="HTML")
         return
-    username = matches[0].lower()
-    chat_incl = matches[1].lower()
-    if username not in monitors:
-        await message.answer(f"⚠️ @{username} не в мониторинге.", parse_mode="HTML")
+    if key not in monitors:
+        await message.answer(f"⚠️ {display_key(key)} не в мониторинге.", parse_mode="HTML")
         return
-    excludes = monitors[username].get("excludes", [])
+    excludes = monitors[key].get("excludes", [])
     if chat_incl in excludes:
         excludes.remove(chat_incl)
         save_monitors()
-        await message.answer(f"✅ Чат @{chat_incl} снова мониторится для @{username}", parse_mode="HTML")
+        await message.answer(f"✅ Чат @{chat_incl} снова мониторится для {display_key(key)}", parse_mode="HTML")
     else:
-        await message.answer(f"⚠️ @{chat_incl} не в исключениях @{username}", parse_mode="HTML")
+        await message.answer(f"⚠️ @{chat_incl} не в исключениях {display_key(key)}", parse_mode="HTML")
 
 
 @dp.message(Command("debug"))
@@ -968,7 +1015,7 @@ async def cmd_start(message: Message):
     if message.from_user.id == MY_USER_ID:
         await message.answer(
             "👁 Бот запущен.\n\n"
-            "<b>Команды:</b>\n"
+            "<b>Команды</b> (вместо @user можно числовой ID):\n"
             "/check @user — мониторить ЛС\n"
             "/uncheck @user — убрать\n"
             "/exclude @user @chat — исключить чат\n"
