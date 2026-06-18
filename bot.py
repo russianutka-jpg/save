@@ -70,15 +70,25 @@ load_monitors()
 def find_monitor_key(text: str) -> str | None:
     """Достаёт цель мониторинга из текста команды.
 
-    Возвращает username (в нижнем регистре) либо 'id:<число>' для Telegram ID.
-    None — если цель не найдена.
+    Поддержка форматов:
+      • @username
+      • id123456789 / id:123456789 / id 123456789  — явный ID (приоритет)
+      • просто число 6+ цифр — fallback (но в /exclude перебивается @чатом, поэтому лучше с префиксом)
+
+    Возвращает username (в нижнем регистре) либо 'id:<число>'. None если не найдено.
     """
     # Убираем /command@botname из начала, чтобы @ бота не считался целью
     cleaned = re.sub(r'^/\w+(@\w+)?\s*', '', text)
+    # 1) Явный префикс id: id1234, id 1234, id:1234
+    m = re.search(r'(?:^|\s)id[:\s]?(\d+)', cleaned, re.IGNORECASE)
+    if m:
+        return f"id:{m.group(1)}"
+    # 2) @username
     m = re.search(r'@(\w+)', cleaned)
     if m:
         return m.group(1).lower()
-    m = re.search(r'(\d{6,})', cleaned)
+    # 3) Голое число 6+ цифр
+    m = re.search(r'\b(\d{6,})\b', cleaned)
     if m:
         return f"id:{m.group(1)}"
     return None
@@ -795,7 +805,7 @@ async def cmd_check(message: Message):
     logging.info(f"cmd_check: from={message.from_user.id} text={text!r} key={find_monitor_key(text)!r}")
     key = find_monitor_key(text)
     if not key:
-        await message.answer("📋 <code>/check @username</code> или <code>/check 123456789</code>", parse_mode="HTML")
+        await message.answer("📋 <code>/check @username</code> или <code>/check id123456789</code>", parse_mode="HTML")
         return
     if key not in monitors:
         monitors[key] = {"added_at": fmt(datetime.now(MSK)), "excludes": []}
@@ -812,7 +822,7 @@ async def cmd_uncheck(message: Message):
     text = message.text or ""
     key = find_monitor_key(text)
     if not key:
-        await message.answer("📋 <code>/uncheck @username</code> или <code>/uncheck 123456789</code>", parse_mode="HTML")
+        await message.answer("📋 <code>/uncheck @username</code> или <code>/uncheck id123456789</code>", parse_mode="HTML")
         return
     if key in monitors:
         del monitors[key]
@@ -860,7 +870,7 @@ async def cmd_last(message: Message):
     # /last @username 10  или  /last 123456789 10  (ID), счётчик опционален
     key = find_monitor_key(text)
     if not key:
-        await message.answer("📋 <code>/last @username 10</code> или <code>/last 123456789 10</code>", parse_mode="HTML")
+        await message.answer("📋 <code>/last @username 10</code> или <code>/last id123456789 10</code>", parse_mode="HTML")
         return
 
     # Счётчик — последнее число, не являющееся самим ID
@@ -943,7 +953,7 @@ async def cmd_exclude(message: Message):
     chat_excl = (ats[0] if key.startswith("id:") else (ats[1] if len(ats) >= 2 else None)) if key else None
     chat_excl = chat_excl.lower() if chat_excl else None
     if not key or not chat_excl:
-        await message.answer("📋 <code>/exclude @мониторимый @чат_исключить</code> (вместо @мониторимый можно ID)", parse_mode="HTML")
+        await message.answer("📋 <code>/exclude @мониторимый @чат_исключить</code>\nвместо @мониторимый можно <code>id123456789</code>", parse_mode="HTML")
         return
     if key not in monitors:
         await message.answer(f"⚠️ {display_key(key)} не в мониторинге.", parse_mode="HTML")
@@ -968,7 +978,7 @@ async def cmd_include(message: Message):
     chat_incl = (ats[0] if key.startswith("id:") else (ats[1] if len(ats) >= 2 else None)) if key else None
     chat_incl = chat_incl.lower() if chat_incl else None
     if not key or not chat_incl:
-        await message.answer("📋 <code>/include @мониторимый @чат_вернуть</code> (вместо @мониторимый можно ID)", parse_mode="HTML")
+        await message.answer("📋 <code>/include @мониторимый @чат_вернуть</code>\nвместо @мониторимый можно <code>id123456789</code>", parse_mode="HTML")
         return
     if key not in monitors:
         await message.answer(f"⚠️ {display_key(key)} не в мониторинге.", parse_mode="HTML")
