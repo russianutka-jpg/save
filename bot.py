@@ -792,6 +792,7 @@ async def cmd_check(message: Message):
     if message.from_user.id != MY_USER_ID:
         return
     text = message.text or ""
+    logging.info(f"cmd_check: from={message.from_user.id} text={text!r} key={find_monitor_key(text)!r}")
     key = find_monitor_key(text)
     if not key:
         await message.answer("📋 <code>/check @username</code> или <code>/check 123456789</code>", parse_mode="HTML")
