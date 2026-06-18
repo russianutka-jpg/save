@@ -73,10 +73,12 @@ def find_monitor_key(text: str) -> str | None:
     Возвращает username (в нижнем регистре) либо 'id:<число>' для Telegram ID.
     None — если цель не найдена.
     """
-    m = re.search(r'@(\w+)', text)
+    # Убираем /command@botname из начала, чтобы @ бота не считался целью
+    cleaned = re.sub(r'^/\w+(@\w+)?\s*', '', text)
+    m = re.search(r'@(\w+)', cleaned)
     if m:
         return m.group(1).lower()
-    m = re.search(r'(\d{6,})', text)  # Telegram ID — минимум 6 цифр
+    m = re.search(r'(\d{6,})', cleaned)
     if m:
         return f"id:{m.group(1)}"
     return None
